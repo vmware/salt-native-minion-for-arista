@@ -1,0 +1,45 @@
+# Copyright 2019-2022 VMware, Inc.
+# SPDX-License-Identifier: Apache-2
+
+# building for Arista 64-bit
+
+## Cython required for PEP538, 540, UTF-8 issue for 'C' locales
+Cython==0.29.30
+
+## using cffi 1.15.0 has libffi-c3922e72.so.8.1.0 issue
+cffi==1.14.3
+
+# match time period for junos-eznc
+pyparsing==2.4.7
+
+# including patched version of junos_eznc as pulled in by napalm and
+# current verions (2.5.3) have __doc__ bug
+## git+https://github.com/dmurphy18/py-junos-eznc@dgm_junos-eznc-250-patch#egg=junos-eznc
+## fix in v2.5.4
+junos-eznc==2.5.4
+
+jmespath==1.0.1
+
+bcrypt==3.2.2       #later requires Rust
+
+## cryptography 3.2 and higher dropped support for openssl 1.0.2, also later requires Rust
+cryptography==3.1.1
+
+## SALT_LOCATION
+./dev_salt/salt/dist/salt-3005.1.tar.gz
+## salt==3005.1
+
+distro==1.5.0
+
+# building for Arista
+# for 32-bit using the following make us too large
+M2Crypto>=0.35.2
+capirca==2.0.3
+
+pyeapi>=0.8.3
+napalm
+textfsm
+remote-pdb
+lxml
+systemd-python
+setproctitle==1.1.10

@@ -1,0 +1,5 @@
+#!/bin/bash
+# Copyright 2019-2022 VMware, Inc.
+# SPDX-License-Identifier: Apache-2
+
+exec /opt/saltstack/salt/run/run call "${@:1}"

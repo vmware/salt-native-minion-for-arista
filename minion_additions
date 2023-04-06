@@ -1,0 +1,14 @@
+# Copyright 2019-2022 VMware, Inc.
+# SPDX-License-Identifier: Apache-2
+
+napalm:
+  username: admin
+  password: admin
+  host: localhost
+  driver: eos
+
+pyeapi:
+  username: admin
+  password: admin
+  transport: socket
+  enablepwd: admin

@@ -1,0 +1,19 @@
+# Copyright 2019-2022 VMware, Inc.
+# SPDX-License-Identifier: Apache-2
+
+[Unit]
+Description=The Salt Minion
+Documentation=man:salt-minion(1) file:///usr/share/doc/salt/html/contents.html https://docs.saltproject.io/en/latest/contents.html
+After=ConnMgr.service ProcMgr.service sockets.target
+
+[Service]
+KillMode=process
+Type=notify
+NotifyAccess=all
+LimitNOFILE=8192
+MemoryLimit=250M
+Nice=19
+ExecStart=/opt/saltstack/salt/run/run minion
+
+[Install]
+WantedBy=multi-user.target

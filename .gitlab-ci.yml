@@ -1,0 +1,1244 @@
+# Copyright 2019-2022 VMware, Inc.
+# SPDX-License-Identifier: Apache-2
+
+---
+stages:
+  - lint
+  - build
+  - pkg_rpm
+  - pkg_swix
+  - test_swix
+#  - upload
+#  - release
+
+
+##  building trial version of CI here which should eventually move to utilize
+## ci-templates.  Trying here first allows for issues to be worked out without
+## having to handle two different branches
+
+variables:
+  PLUGIN_PACKAGES: "*.swix"
+  CICD_UPSTREAM_PATH: "saltstack/open/salt-native-minion-arista"
+  CICD_SALT_VERSION:  "3004.2"
+  CICD_SALT_RELEASE:  "1"
+  CICD_SALT_DATE: "Thu Jan 1 1970"
+#  CICD_SALT_LOCATION: "git+https://github.com/saltstack/salt@${CI_COMMIT_REF_NAME}#egg=salt"
+  CICD_SALT_LOCATION: "salt"
+  CICD_SALT_DEV_BRANCH: "master"
+  CICD_PYTHON_VER: "3.7.10"
+
+workflow:
+  rules:
+    - if: $CI_MERGE_REQUEST_ID == null
+
+default:
+  before_script:
+    - mkdir /root/ || true
+    - echo "machine gitlab.com login gitlab-ci-token password ${CI_JOB_TOKEN}" >> ~/.netrc
+
+
+## Build 32-bit Arista
+##
+## Have to pull the version of salt that is being installed from that located in
+## CICD_SALT_LOCATION which depending on the nature of the build or development
+## can be of the following forms:
+##
+##  salt        - regular install from PyPI
+##  git+https://github.com/saltstack/salt#egg=salt
+##  git+https://github.com/dmurphy18/salt@v3000.4.arista#egg=salt
+##  git+ssh://git@github.com/dmurphy18/salt-cve@v3001.2#egg=salt
+
+build-arista32:
+  stage: build
+##  image: docker.artifactory.saltstack.net/centos:7-i386
+  artifacts:
+    name: "$CI_JOB_NAME-$CI_COMMIT_REF_NAME"
+    paths:
+      - dist/run
+      - trigger_file_done
+    expire_in: 120 days
+    reports:
+      dotenv: build.env
+  tags:
+    - centos7-altarch
+  script:
+    - gitlab-runner --version
+    - oldpwd=$(pwd)
+    - rm -fR dist
+    - yum -q makecache
+    - yum -y -q install python3-devel
+    - PYENV_CHECK=$(pyenv versions | grep ${CICD_PYTHON_VER})
+    - if [[ -n "${PYENV_CHECK}" ]]; then echo "Python ${CICD_PYTHON_VER} already installed. Skipping."; else pyenv install ${CICD_PYTHON_VER}; fi
+    - pyenv shell ${CICD_PYTHON_VER}
+    - cd /usr/bin/
+    - ldconfig /usr/local/lib
+    - export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
+    - export PATH=/usr/local/bin:/usr/bin:$PATH
+    - pip3 install pop-config==6.11.1
+    - pip3 install tiamat==7.10.2
+    - pyenv rehash && hash -r
+    - export CICD_SALT_DATE=$(date +"%a %b %0d %Y")
+    - export CICD_SALT_LOCATION_NB="git+https://github.com/saltstack/salt@$CICD_SALT_DEV_BRANCH#egg=salt"
+    - cd ${oldpwd}
+    - rm -fR dev_salt
+    - mkdir dev_salt
+    - cd dev_salt
+    - git clone -q https://github.com/saltstack/salt.git
+    - cd salt
+    - python3 setup.py -q sdist
+    - cd dist
+    ## - cd dev_salt/salt/dist
+    - ls -alh
+    - export CICD_SALT_TAR_GZ_NAME=$(ls salt-*)
+    - export CICD_SALT_LOCATION_NB=$(pwd)/${CICD_SALT_TAR_GZ_NAME}
+    - export CICD_SALT_VERSION=$(ls salt-* | sed s/salt-// | sed s/.tar.gz//)
+    - echo "${CICD_SALT_VERSION}"
+    - echo "${CICD_SALT_RELEASE}"
+    - echo "CI_PROJECT_DIR is ${CI_PROJECT_DIR}"
+    - cd ${oldpwd}
+    - rm -f arista_requirements.txt
+    - cp requirements.txt arista_requirements.txt
+    - export CICD_SALT_LOCATION_NB="./dev_salt/salt/dist/salt-${CICD_SALT_VERSION}.tar.gz"
+    - echo "CICD_SALT_LOCATION_NB is ${CICD_SALT_LOCATION_NB}"
+    - sed -i 's&SALT_LOCATION&'"${CICD_SALT_LOCATION_NB}"'&' arista_requirements.txt
+    - sed -i 's&SALT_REPLACE_COMMENT_CHECK&## &' arista_requirements.txt
+    - cat arista_requirements.txt
+    - export CICD_SALT_VERSION_ADJ=$(echo "$CICD_SALT_VERSION" | sed  "s/-/_/"g | sed "s/+/_/"g)
+    - echo "CICD_SALT_VERSION_ADJ is $CICD_SALT_VERSION_ADJ"
+    - echo "CICD_SALT_DATE=$CICD_SALT_DATE" > build.env
+    - echo "CICD_SALT_VERSION=$CICD_SALT_VERSION" >> build.env
+    - echo "CICD_SALT_VERSION_ADJ=$CICD_SALT_VERSION_ADJ" >> build.env
+    - echo "CICD_SALT_RELEASE=$CICD_SALT_RELEASE" >> build.env
+    - cd ${oldpwd}
+    ## now build
+    - time tiamat build -c build.conf
+    - ls -alh dist/run
+    - du -sh dist/run
+    - find dist -name "__pycache__" | xargs rm -fR
+    - find dist -name "*.pyc" | xargs rm -f
+    - rm -fR dist/run/Cryptodome/SelfTest
+    - du -sh dist/run
+    - echo "done" > trigger_file_done
+  rules:
+    - if: $CI_COMMIT_TAG
+      when: never
+    - when: on_success
+
+
+build-tags-arista32:
+  stage: build
+  ## image: docker.artifactory.saltstack.net/centos:7-i386
+  artifacts:
+    name: "$CI_JOB_NAME-$CI_COMMIT_REF_NAME"
+    paths:
+      - dist/run
+    expire_in: 120 days
+    reports:
+      dotenv: build.env
+  tags:
+    - centos7-altarch
+  script:
+    - gitlab-runner --version
+    - oldpwd=$(pwd)
+    - rm -fR dist
+    - yum -q makecache
+    - yum -y -q install python3-devel
+    - PYENV_CHECK=$(pyenv versions | grep ${CICD_PYTHON_VER})
+    - if [[ -n "${PYENV_CHECK}" ]]; then echo "Python ${CICD_PYTHON_VER} already installed. Skipping."; else pyenv install ${CICD_PYTHON_VER}; fi
+    - pyenv shell ${CICD_PYTHON_VER}
+    - cd /usr/bin/
+    - ldconfig /usr/local/lib
+    - export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
+    - export PATH=/usr/local/bin:/usr/bin:$PATH
+    - pip3 install pop-config==6.11.1
+    - pip3 install tiamat==7.10.2
+    - pyenv rehash && hash -r
+    - export CICD_SALT_DATE=$(date +"%a %b %0d %Y")
+    - export CICD_SALT_TAG=$(echo "${CI_COMMIT_TAG}" | cut -d '-' -f 1)
+    - export CICD_SALT_VERSION=$(echo "${CI_COMMIT_TAG}" | sed s/v// | cut -d '-' -f 1)
+    - export CICD_SALT_RELEASE=$(echo "${CI_COMMIT_TAG}" | sed s/v// | cut -d '-' -f 2)
+    ## ensure if no release number given default to 1
+    - if [[ "${CICD_SALT_VERSION}" = "${CICD_SALT_RELEASE}" ]]; then export CICD_SALT_RELEASE=1; fi
+    - export CICD_SALT_LOCATION="git+https://github.com/saltstack/salt@$CICD_SALT_TAG#egg=salt"
+    - echo "$CICD_SALT_TAG"
+    - echo "$CICD_SALT_VERSION"
+    - echo "$CICD_SALT_RELEASE"
+    - echo "$CICD_SALT_LOCATION"
+    - cd ${oldpwd}
+    - rm -f arista_requirements.txt
+    - cp requirements.txt arista_requirements.txt
+    - sed -i 's&SALT_LOCATION&'"$CICD_SALT_LOCATION"'&' arista_requirements.txt
+    - sed -i 's&SALT_REPLACE_COMMENT_CHECK&## &' arista_requirements.txt
+    - cat arista_requirements.txt
+    - echo "CICD_SALT_DATE=$CICD_SALT_DATE" > build.env
+    - echo "CICD_SALT_VERSION=$CICD_SALT_VERSION" >> build.env
+    - echo "CICD_SALT_RELEASE=$CICD_SALT_RELEASE" >> build.env
+    - cd ${oldpwd}
+    ## now build
+    - time tiamat build -c build.conf
+
+  rules:
+    - if: "$CI_COMMIT_TAG != null && $CI_PROJECT_PATH == $CICD_UPSTREAM_PATH"
+      when: always
+    - when: never
+
+
+pkg-rpm-arista32:
+  stage: pkg_rpm
+  artifacts:
+    name: "$CI_JOB_NAME-$CI_COMMIT_REF_NAME"
+    paths:
+      - build_product_32
+      - dep_rpms_32
+    expire_in: 120 days
+  needs:
+    - job: build-arista32
+  tags:
+    - fedora18
+  script:
+    - gitlab-runner --version
+    - oldpwd=$(pwd)
+    - find dist -name "__pycache__" | xargs rm -fR
+    - find dist -name "*.pyc" | xargs rm -f
+    - rm -fR dist/run/Cryptodome/SelfTest
+    - ls -alh dist
+    - du -sh dist
+    - echo "%_topdir /root/rpmbuild" >  /root/.rpmmacros
+    - echo "%_signature gpg" >>  /root/.rpmmacros
+    - echo "%_gpg_name packaging@saltstack.com" >>  /root/.rpmmacros
+    - rm -fR /root/rpmbuild
+    - mkdir -p /root/rpmbuild/{SPECS,SOURCES,BUILD}
+    - cp rpm_files/SPECS/salt-arista32.spec /root/rpmbuild/SPECS/
+    - echo "CICD_SALT_VERSION is $CICD_SALT_VERSION"
+    - echo "CICD_SALT_VERSION_ADJ is $CICD_SALT_VERSION_ADJ"
+    - sed -i "s/VERSION_TO_BE_REPLACED/$CICD_SALT_VERSION_ADJ/g" /root/rpmbuild/SPECS/salt-arista32.spec
+    - sed -i "s/RELEASE_TO_BE_REPLACED/$CICD_SALT_RELEASE/g" /root/rpmbuild/SPECS/salt-arista32.spec
+    - sed -i "s/DATE_TO_BE_REPLACED/$CICD_SALT_DATE/g" /root/rpmbuild/SPECS/salt-arista32.spec
+    - cp rpm_files/SOURCES/salt-minion.service /root/rpmbuild/SOURCES/
+    - cp rpm_files/SOURCES/salt-minion /root/rpmbuild/SOURCES/
+    - cp rpm_files/SOURCES/salt-common.logrotate /root/rpmbuild/SOURCES/
+    - cp rpm_files/SOURCES/salt-call /root/rpmbuild/SOURCES/
+    - cp rpm_files/SOURCES/salt-bin-arista /root/rpmbuild/SOURCES/
+    - cp rpm_files/SOURCES/minion /root/rpmbuild/SOURCES/
+    - cp -R dist/run /root/rpmbuild/SOURCES/
+    - ls -alh /root/rpmbuild/SOURCES/
+    - du -sh /root/rpmbuild/SOURCES/
+    - cd /root/rpmbuild
+##    - rpmspec -v -P ./SPECS/salt-arista32.spec
+    - rpmbuild --quiet -ba ./SPECS/salt-arista32.spec
+    - cd ${oldpwd}
+    - rm -fR dep_rpms_32
+    - cp -R rpm_files/dep_rpms_32 .
+    - rm -fR build_product_32
+    - mkdir build_product_32
+    - ls -alh /root/rpmbuild/RPMS/i686/*
+    - cp -R /root/rpmbuild/RPMS/i686/salt*.rpm build_product_32/
+
+  rules:
+    - if: $CI_COMMIT_TAG
+      when: never
+    - when: on_success
+
+
+pkg-tags-rpm-arista32:
+  stage: pkg_rpm
+  artifacts:
+    name: "$CI_JOB_NAME-$CI_COMMIT_REF_NAME"
+    paths:
+      - build_product_32
+      - dep_rpms_32
+    expire_in: 120 days
+  needs:
+    - job: build-tags-arista32
+  tags:
+    - fedora18
+  script:
+    - gitlab-runner --version
+    - oldpwd=$(pwd)
+    - find dist -name "__pycache__" | xargs rm -fR
+    - find dist -name "*.pyc" | xargs rm -f
+    - rm -fR dist/run/Cryptodome/SelfTest
+    - ls -alh dist
+    - du -sh dist
+    - echo "%_topdir /root/rpmbuild" >  /root/.rpmmacros
+    - echo "%_signature gpg" >>  /root/.rpmmacros
+    - echo "%_gpg_name packaging@saltstack.com" >>  /root/.rpmmacros
+    - rm -fR /root/rpmbuild
+    - mkdir -p /root/rpmbuild/{SPECS,SOURCES,BUILD}
+    - cp rpm_files/SPECS/salt-arista32.spec /root/rpmbuild/SPECS/
+    - sed -i "s/VERSION_TO_BE_REPLACED/$CICD_SALT_VERSION/g" /root/rpmbuild/SPECS/salt-arista32.spec
+    - sed -i "s/RELEASE_TO_BE_REPLACED/$CICD_SALT_RELEASE/g" /root/rpmbuild/SPECS/salt-arista32.spec
+    - sed -i "s/DATE_TO_BE_REPLACED/$CICD_SALT_DATE/g" /root/rpmbuild/SPECS/salt-arista32.spec
+    - cp rpm_files/SOURCES/salt-minion.service /root/rpmbuild/SOURCES/
+    - cp rpm_files/SOURCES/salt-minion /root/rpmbuild/SOURCES/
+    - cp rpm_files/SOURCES/salt-common.logrotate /root/rpmbuild/SOURCES/
+    - cp rpm_files/SOURCES/salt-call /root/rpmbuild/SOURCES/
+    - cp rpm_files/SOURCES/salt-bin-arista /root/rpmbuild/SOURCES/
+    - cp rpm_files/SOURCES/minion /root/rpmbuild/SOURCES/
+    - cp -R dist/run /root/rpmbuild/SOURCES/
+    - ls -alh /root/rpmbuild/SOURCES/
+    - du -sh /root/rpmbuild/SOURCES/
+    - cd /root/rpmbuild
+##    - rpmspec -v -P ./SPECS/salt-arista32.spec
+    - rpmbuild --quiet -ba ./SPECS/salt-arista32.spec
+    - cd ${oldpwd}
+    - rm -fR dep_rpms_32
+    - cp -R rpm_files/dep_rpms_32 .
+    - rm -fR build_product_32
+    - mkdir build_product_32
+    - ls -alh /root/rpmbuild/RPMS/i686/*
+    - cp -R /root/rpmbuild/RPMS/i686/salt*.rpm build_product_32/
+
+  rules:
+    - if: "$CI_COMMIT_TAG != null && $CI_PROJECT_PATH == $CICD_UPSTREAM_PATH"
+      when: always
+    - when: never
+
+
+pkg-swix-arista32:
+  stage: pkg_swix
+  artifacts:
+    name: "$CI_JOB_NAME-$CI_COMMIT_REF_NAME"
+    paths:
+      - "*.swix"
+      - "trigger_file_done"
+
+    expire_in: 120 days
+  needs: [ "build-arista32", "pkg-rpm-arista32" ]
+  variables:
+    GIT_STRATEGY: none
+  tags:
+    - veos-418
+  script:
+    - gitlab-runner --version
+    - oldpwd=$(pwd)
+    - rm -f salt-*.swix
+    - cp build_product_32/salt*.i686.rpm /mnt/flash/
+    - cp dep_rpms_32/*.rpm /mnt/flash/
+    - cd /mnt/flash
+    - rm -f salt-*.swix
+    - ls -alh
+    - du -sh *
+    - echo "CICD_SALT_VERSION is ${CICD_SALT_VERSION}"
+    - echo "CICD_SALT_VERSION_ADJ is ${CICD_SALT_VERSION_ADJ}"
+    - echo "CICD_SALT_RELEASE is ${CICD_SALT_RELEASE}"
+    - swix create "salt-${CICD_SALT_VERSION_ADJ}-${CICD_SALT_RELEASE}.swix" "salt-${CICD_SALT_VERSION_ADJ}-${CICD_SALT_RELEASE}.i686.rpm" libXau-1.0.6-4.fc18.i686.rpm libXau-devel-1.0.6-4.fc18.i686.rpm xorg-x11-proto-devel-7.6-24.fc18.noarch.rpm libxcb-1.9-3.fc18.i686.rpm libxcb-devel-1.9-3.fc18.i686.rpm
+    - ls -alh
+    - du -sh *
+    - mv "salt-${CICD_SALT_VERSION_ADJ}-${CICD_SALT_RELEASE}.swix" "${oldpwd}/salt-${CICD_SALT_VERSION_ADJ}-${CICD_SALT_RELEASE}.32.swix"
+    - echo "done" > ${oldpwd}/trigger_file_done
+
+  rules:
+    - if: $CI_COMMIT_TAG
+      when: never
+    - when: on_success
+
+
+pkg-tags-swix-arista32:
+  stage: pkg_swix
+  artifacts:
+    name: "$CI_JOB_NAME-$CI_COMMIT_REF_NAME"
+    paths:
+      - "*.swix"
+      - "trigger_file_done"
+    expire_in: 120 days
+  needs: [ "build-tags-arista32", "pkg-tags-rpm-arista32" ]
+  variables:
+    GIT_STRATEGY: none
+  tags:
+    - veos-418
+  script:
+    - gitlab-runner --version
+    - oldpwd=$(pwd)
+    - rm -f salt-*.swix
+    - cp build_product_32/salt*.i686.rpm /mnt/flash/
+    - cp dep_rpms_32/*.rpm /mnt/flash/
+    - cd /mnt/flash
+    - rm -f salt-*.swix
+    - ls -alh
+    - du -sh *
+    - echo "CICD_SALT_VERSION is ${CICD_SALT_VERSION}"
+    - echo "CICD_SALT_RELEASE is ${CICD_SALT_RELEASE}"
+    - swix create "salt-${CICD_SALT_VERSION}-${CICD_SALT_RELEASE}.swix" "salt-${CICD_SALT_VERSION}-${CICD_SALT_RELEASE}.i686.rpm" libXau-1.0.6-4.fc18.i686.rpm libXau-devel-1.0.6-4.fc18.i686.rpm xorg-x11-proto-devel-7.6-24.fc18.noarch.rpm libxcb-1.9-3.fc18.i686.rpm libxcb-devel-1.9-3.fc18.i686.rpm
+    - ls -alh
+    - du -sh *
+    - mv "salt-${CICD_SALT_VERSION}-${CICD_SALT_RELEASE}.swix" "${oldpwd}/salt-${CICD_SALT_VERSION}-${CICD_SALT_RELEASE}.32.swix"
+    - echo "done" > ${oldpwd}/trigger_file_done
+
+  rules:
+    - if: "$CI_COMMIT_TAG != null && $CI_PROJECT_PATH == $CICD_UPSTREAM_PATH"
+      when: always
+    - when: never
+
+
+## v4.18 - v4.21 inclusive have issues with running copy flash:salt-xyz.32.swix commands with FastCli
+## have tested with versions that on real VirtualBox implementations of Arista v4.18 - v.421 using the
+## same command with FastCli.  Note: no problems on v4.22 and higher.  Hence skipping testing on v4.18-v4.21
+
+
+test-swix-arista32_422:
+  stage: test_swix
+  artifacts:
+    name: "$CI_JOB_NAME-$CI_COMMIT_REF_NAME"
+    expire_in: 120 days
+  needs: [ "build-arista32", "pkg-rpm-arista32", "pkg-swix-arista32" ]
+  tags:
+    - veos-422
+  script:
+    - gitlab-runner --version
+    - pwd
+    - id
+    - sudo yum clean all
+    - rm -rf dist/
+    - rm -rf build_product_32/
+    - df -h
+    - echo "CICD_SALT_VERSION is ${CICD_SALT_VERSION}"
+    - echo "CICD_SALT_VERSION_ADJ is ${CICD_SALT_VERSION_ADJ}"
+    - echo "CICD_SALT_RELEASE is ${CICD_SALT_RELEASE}"
+    - mv salt-${CICD_SALT_VERSION_ADJ}-${CICD_SALT_RELEASE}.32.swix /mnt/flash/
+    - ls -alh /mnt/flash/salt-${CICD_SALT_VERSION_ADJ}-${CICD_SALT_RELEASE}.32.swix
+    - echo $PATH
+    - /usr/bin/FastCli -c "$(echo -e enable\\nshow version)"
+    - /usr/bin/FastCli -c "show extensions" -e -p 15
+    - /usr/bin/FastCli -c "show management api http-commands" -e -p 15
+    - /usr/bin/FastCli -c "$(echo -e enable\\nconfigure\\nmanagement api http-commands\\nprotocol unix-socket\\nno shutdown\\nend\\nwri)"
+    - /usr/bin/FastCli -c "show management api http-commands" -e -p 15
+    - /usr/bin/FastCli -c "dir flash:" -e -p 15
+    - /usr/bin/FastCli -c "copy flash:salt-${CICD_SALT_VERSION_ADJ}-${CICD_SALT_RELEASE}.32.swix extension:" -e -p 15
+    - /usr/bin/FastCli -c "extension salt-${CICD_SALT_VERSION_ADJ}-${CICD_SALT_RELEASE}.32.swix" -e -p 15
+    - /usr/bin/FastCli -c "show extensions" -e -p 15
+    - sudo yum clean all
+    - ls -alh /opt/saltstack/salt/run/
+    - ls -alh /usr/bin/salt-call
+    - ls -alh /usr/bin/salt-minion
+    - ls -alh /usr/bin/salt-bin-arista/salt-bin-arista
+    ## due to GitLab CI/CD parsing of colons, needs to be so
+    - sudo cat minion_additions | sudo tee -a /etc/salt/minion
+    - sudo -u root id
+    - id
+    - sudo -u root /usr/bin/salt-call --local test.versions
+    - sudo -u root /usr/bin/salt-call --local grains.items
+    - sudo -u root /usr/bin/salt-call --local cmd.run "ls -al /"
+    - sudo -u root /usr/bin/salt-call --local cmd.run 'FastCli --sysname ar --privilege 15 -c "show version"'
+    - sudo -u root /usr/bin/systemctl restart salt-minion
+    - sudo -u root /usr/bin/salt-call --local pyeapi.get_config
+    - sudo -u root /usr/bin/salt-call --local napalm.alive
+    - sudo -u root /usr/bin/salt-call --local sys.doc none
+
+  rules:
+    - if: $CI_COMMIT_TAG
+      when: never
+    - when: on_success
+
+
+test-swix-arista32_423:
+  stage: test_swix
+  artifacts:
+    name: "$CI_JOB_NAME-$CI_COMMIT_REF_NAME"
+    expire_in: 120 days
+  needs: [ "build-arista32", "pkg-rpm-arista32", "pkg-swix-arista32" ]
+  tags:
+    - veos-423
+  script:
+    - gitlab-runner --version
+    - pwd
+    - id
+    - sudo yum clean all
+    - rm -rf dist/
+    - rm -rf build_product_32/
+    - df -h
+    - echo "CICD_SALT_VERSION is ${CICD_SALT_VERSION}"
+    - echo "CICD_SALT_VERSION_ADJ is ${CICD_SALT_VERSION_ADJ}"
+    - echo "CICD_SALT_RELEASE is ${CICD_SALT_RELEASE}"
+    - mv salt-${CICD_SALT_VERSION_ADJ}-${CICD_SALT_RELEASE}.32.swix /mnt/flash/
+    - ls -alh /mnt/flash/salt-${CICD_SALT_VERSION_ADJ}-${CICD_SALT_RELEASE}.32.swix
+    - echo $PATH
+    - /usr/bin/FastCli -c "$(echo -e enable\\nshow version)"
+    - /usr/bin/FastCli -c "show extensions" -e -p 15
+    - /usr/bin/FastCli -c "show management api http-commands" -e -p 15
+    - /usr/bin/FastCli -c "$(echo -e enable\\nconfigure\\nmanagement api http-commands\\nprotocol unix-socket\\nno shutdown\\nend\\nwri)"
+    - /usr/bin/FastCli -c "show management api http-commands" -e -p 15
+    - /usr/bin/FastCli -c "dir flash:" -e -p 15
+    - /usr/bin/FastCli -c "copy flash:salt-${CICD_SALT_VERSION_ADJ}-${CICD_SALT_RELEASE}.32.swix extension:" -e -p 15
+    - /usr/bin/FastCli -c "extension salt-${CICD_SALT_VERSION_ADJ}-${CICD_SALT_RELEASE}.32.swix" -e -p 15
+    - /usr/bin/FastCli -c "show extensions" -e -p 15
+    - sudo yum clean all
+    - ls -alh /opt/saltstack/salt/run/
+    - ls -alh /usr/bin/salt-call
+    - ls -alh /usr/bin/salt-minion
+    - ls -alh /usr/bin/salt-bin-arista/salt-bin-arista
+    ## due to GitLab CI/CD parsing of colons, needs to be so
+    - sudo cat minion_additions | sudo tee -a /etc/salt/minion
+    - sudo -u root id
+    - id
+    - sudo -u root /usr/bin/salt-call --local test.versions
+    - sudo -u root /usr/bin/salt-call --local grains.items
+    - sudo -u root /usr/bin/salt-call --local cmd.run "ls -al /"
+    - sudo -u root /usr/bin/salt-call --local cmd.run 'FastCli --sysname ar --privilege 15 -c "show version"'
+    - sudo -u root /usr/bin/systemctl restart salt-minion
+    - sudo -u root /usr/bin/salt-call --local pyeapi.get_config
+    - sudo -u root /usr/bin/salt-call --local napalm.alive
+    - sudo -u root /usr/bin/salt-call --local sys.doc none
+
+  rules:
+    - if: $CI_COMMIT_TAG
+      when: never
+    - when: on_success
+
+
+test-swix-arista32_424:
+  stage: test_swix
+  artifacts:
+    name: "$CI_JOB_NAME-$CI_COMMIT_REF_NAME"
+    expire_in: 120 days
+  needs: [ "build-arista32", "pkg-rpm-arista32", "pkg-swix-arista32" ]
+  tags:
+    - veos-424
+  script:
+    - gitlab-runner --version
+    - pwd
+    - id
+    - sudo yum clean all
+    - rm -rf dist/
+    - rm -rf build_product_32/
+    - df -h
+    - echo "CICD_SALT_VERSION is ${CICD_SALT_VERSION}"
+    - echo "CICD_SALT_VERSION_ADJ is ${CICD_SALT_VERSION_ADJ}"
+    - echo "CICD_SALT_RELEASE is ${CICD_SALT_RELEASE}"
+    - mv salt-${CICD_SALT_VERSION_ADJ}-${CICD_SALT_RELEASE}.32.swix /mnt/flash/
+    - ls -alh /mnt/flash/salt-${CICD_SALT_VERSION_ADJ}-${CICD_SALT_RELEASE}.32.swix
+    - echo $PATH
+    - /usr/bin/FastCli -c "$(echo -e enable\\nshow version)"
+    - /usr/bin/FastCli -c "show extensions" -e -p 15
+    - /usr/bin/FastCli -c "show management api http-commands" -e -p 15
+    - /usr/bin/FastCli -c "$(echo -e enable\\nconfigure\\nmanagement api http-commands\\nprotocol unix-socket\\nno shutdown\\nend\\nwri)"
+    - /usr/bin/FastCli -c "show management api http-commands" -e -p 15
+    - /usr/bin/FastCli -c "dir flash:" -e -p 15
+    - /usr/bin/FastCli -c "copy flash:salt-${CICD_SALT_VERSION_ADJ}-${CICD_SALT_RELEASE}.32.swix extension:" -e -p 15
+    - /usr/bin/FastCli -c "extension salt-${CICD_SALT_VERSION_ADJ}-${CICD_SALT_RELEASE}.32.swix" -e -p 15
+    - /usr/bin/FastCli -c "show extensions" -e -p 15
+    - sudo yum clean all
+    - ls -alh /opt/saltstack/salt/run/
+    - ls -alh /usr/bin/salt-call
+    - ls -alh /usr/bin/salt-minion
+    - ls -alh /usr/bin/salt-bin-arista/salt-bin-arista
+    ## due to GitLab CI/CD parsing of colons, needs to be so
+    - sudo cat minion_additions | sudo tee -a /etc/salt/minion
+    - sudo -u root id
+    - id
+    - sudo -u root /usr/bin/salt-call --local test.versions
+    - sudo -u root /usr/bin/salt-call --local grains.items
+    - sudo -u root /usr/bin/salt-call --local cmd.run "ls -al /"
+    - sudo -u root /usr/bin/salt-call --local cmd.run 'FastCli --sysname ar --privilege 15 -c "show version"'
+    - sudo -u root /usr/bin/systemctl restart salt-minion
+    - sudo -u root /usr/bin/salt-call --local pyeapi.get_config
+    - sudo -u root /usr/bin/salt-call --local napalm.alive
+    - sudo -u root /usr/bin/salt-call --local sys.doc none
+
+  rules:
+    - if: $CI_COMMIT_TAG
+      when: never
+    - when: on_success
+
+
+test-tags-swix-arista32_422:
+  stage: test_swix
+  artifacts:
+    name: "$CI_JOB_NAME-$CI_COMMIT_REF_NAME"
+    expire_in: 120 days
+  needs: [ "build-tags-arista32", "pkg-tags-rpm-arista32", "pkg-tags-swix-arista32" ]
+  tags:
+    - veos-422
+  script:
+    - gitlab-runner --version
+    - pwd
+    - id
+    - sudo yum clean all
+    - rm -rf dist/
+    - rm -rf build_product_32/
+    - df -h
+    - echo "CICD_SALT_VERSION is ${CICD_SALT_VERSION}"
+    - echo "CICD_SALT_RELEASE is ${CICD_SALT_RELEASE}"
+    - mv salt-${CICD_SALT_VERSION}-${CICD_SALT_RELEASE}.32.swix /mnt/flash/
+    - ls -alh /mnt/flash/salt-${CICD_SALT_VERSION}-${CICD_SALT_RELEASE}.32.swix
+    - echo $PATH
+    - /usr/bin/FastCli -c "$(echo -e enable\\nshow version)"
+    - /usr/bin/FastCli -c "show extensions" -e -p 15
+    - /usr/bin/FastCli -c "show management api http-commands" -e -p 15
+    - /usr/bin/FastCli -c "$(echo -e enable\\nconfigure\\nmanagement api http-commands\\nprotocol unix-socket\\nno shutdown\\nend\\nwri)"
+    - /usr/bin/FastCli -c "show management api http-commands" -e -p 15
+    - /usr/bin/FastCli -c "dir flash:" -e -p 15
+    - /usr/bin/FastCli -c "copy flash:salt-${CICD_SALT_VERSION}-${CICD_SALT_RELEASE}.32.swix extension:" -e -p 15
+    - /usr/bin/FastCli -c "extension salt-${CICD_SALT_VERSION}-${CICD_SALT_RELEASE}.32.swix" -e -p 15
+    - /usr/bin/FastCli -c "show extensions" -e -p 15
+    - sudo yum clean all
+    - ls -alh /opt/saltstack/salt/run/
+    - ls -alh /usr/bin/salt-call
+    - ls -alh /usr/bin/salt-minion
+    - ls -alh /usr/bin/salt-bin-arista/salt-bin-arista
+    ## due to GitLab CI/CD parsing of colons, needs to be so
+    - sudo cat minion_additions | sudo tee -a /etc/salt/minion
+    - sudo -u root id
+    - id
+    - sudo -u root /usr/bin/salt-call --local test.versions
+    - sudo -u root /usr/bin/salt-call --local grains.items
+    - sudo -u root /usr/bin/salt-call --local cmd.run "ls -al /"
+    - sudo -u root /usr/bin/salt-call --local cmd.run 'FastCli --sysname ar --privilege 15 -c "show version"'
+    - sudo -u root /usr/bin/systemctl restart salt-minion
+    - sudo -u root /usr/bin/salt-call --local pyeapi.get_config
+    - sudo -u root /usr/bin/salt-call --local napalm.alive
+    - sudo -u root /usr/bin/salt-call --local sys.doc none
+
+  rules:
+    - if: "$CI_COMMIT_TAG != null && $CI_PROJECT_PATH == $CICD_UPSTREAM_PATH"
+      when: always
+    - when: never
+
+
+test-tags-swix-arista32_423:
+  stage: test_swix
+  artifacts:
+    name: "$CI_JOB_NAME-$CI_COMMIT_REF_NAME"
+    expire_in: 120 days
+  needs: [ "build-tags-arista32", "pkg-tags-rpm-arista32", "pkg-tags-swix-arista32" ]
+  tags:
+    - veos-423
+  script:
+    - gitlab-runner --version
+    - pwd
+    - id
+    - sudo yum clean all
+    - rm -rf dist/
+    - rm -rf build_product_32/
+    - df -h
+    - echo "CICD_SALT_VERSION is ${CICD_SALT_VERSION}"
+    - echo "CICD_SALT_RELEASE is ${CICD_SALT_RELEASE}"
+    - mv salt-${CICD_SALT_VERSION}-${CICD_SALT_RELEASE}.32.swix /mnt/flash/
+    - ls -alh /mnt/flash/salt-${CICD_SALT_VERSION}-${CICD_SALT_RELEASE}.32.swix
+    - echo $PATH
+    - /usr/bin/FastCli -c "$(echo -e enable\\nshow version)"
+    - /usr/bin/FastCli -c "show extensions" -e -p 15
+    - /usr/bin/FastCli -c "show management api http-commands" -e -p 15
+    - /usr/bin/FastCli -c "$(echo -e enable\\nconfigure\\nmanagement api http-commands\\nprotocol unix-socket\\nno shutdown\\nend\\nwri)"
+    - /usr/bin/FastCli -c "show management api http-commands" -e -p 15
+    - /usr/bin/FastCli -c "dir flash:" -e -p 15
+    - /usr/bin/FastCli -c "copy flash:salt-${CICD_SALT_VERSION}-${CICD_SALT_RELEASE}.32.swix extension:" -e -p 15
+    - /usr/bin/FastCli -c "extension salt-${CICD_SALT_VERSION}-${CICD_SALT_RELEASE}.32.swix" -e -p 15
+    - /usr/bin/FastCli -c "show extensions" -e -p 15
+    - sudo yum clean all
+    - ls -alh /opt/saltstack/salt/run/
+    - ls -alh /usr/bin/salt-call
+    - ls -alh /usr/bin/salt-minion
+    - ls -alh /usr/bin/salt-bin-arista/salt-bin-arista
+    ## due to GitLab CI/CD parsing of colons, needs to be so
+    - sudo cat minion_additions | sudo tee -a /etc/salt/minion
+    - sudo -u root id
+    - id
+    - sudo -u root /usr/bin/salt-call --local test.versions
+    - sudo -u root /usr/bin/salt-call --local grains.items
+    - sudo -u root /usr/bin/salt-call --local cmd.run "ls -al /"
+    - sudo -u root /usr/bin/salt-call --local cmd.run 'FastCli --sysname ar --privilege 15 -c "show version"'
+    - sudo -u root /usr/bin/systemctl restart salt-minion
+    - sudo -u root /usr/bin/salt-call --local pyeapi.get_config
+    - sudo -u root /usr/bin/salt-call --local napalm.alive
+    - sudo -u root /usr/bin/salt-call --local sys.doc none
+
+  rules:
+    - if: "$CI_COMMIT_TAG != null && $CI_PROJECT_PATH == $CICD_UPSTREAM_PATH"
+      when: always
+    - when: never
+
+
+test-tags-swix-arista32_424:
+  stage: test_swix
+  artifacts:
+    name: "$CI_JOB_NAME-$CI_COMMIT_REF_NAME"
+    expire_in: 120 days
+  needs: [ "build-tags-arista32", "pkg-tags-rpm-arista32", "pkg-tags-swix-arista32" ]
+  tags:
+    - veos-424
+  script:
+    - gitlab-runner --version
+    - pwd
+    - id
+    - sudo yum clean all
+    - rm -rf dist/
+    - rm -rf build_product_32/
+    - df -h
+    - echo "CICD_SALT_VERSION is ${CICD_SALT_VERSION}"
+    - echo "CICD_SALT_RELEASE is ${CICD_SALT_RELEASE}"
+    - mv salt-${CICD_SALT_VERSION}-${CICD_SALT_RELEASE}.32.swix /mnt/flash/
+    - ls -alh /mnt/flash/salt-${CICD_SALT_VERSION}-${CICD_SALT_RELEASE}.32.swix
+    - echo $PATH
+    - /usr/bin/FastCli -c "$(echo -e enable\\nshow version)"
+    - /usr/bin/FastCli -c "show extensions" -e -p 15
+    - /usr/bin/FastCli -c "show management api http-commands" -e -p 15
+    - /usr/bin/FastCli -c "$(echo -e enable\\nconfigure\\nmanagement api http-commands\\nprotocol unix-socket\\nno shutdown\\nend\\nwri)"
+    - /usr/bin/FastCli -c "show management api http-commands" -e -p 15
+    - /usr/bin/FastCli -c "dir flash:" -e -p 15
+    - /usr/bin/FastCli -c "copy flash:salt-${CICD_SALT_VERSION}-${CICD_SALT_RELEASE}.32.swix extension:" -e -p 15
+    - /usr/bin/FastCli -c "extension salt-${CICD_SALT_VERSION}-${CICD_SALT_RELEASE}.32.swix" -e -p 15
+    - /usr/bin/FastCli -c "show extensions" -e -p 15
+    - sudo yum clean all
+    - ls -alh /opt/saltstack/salt/run/
+    - ls -alh /usr/bin/salt-call
+    - ls -alh /usr/bin/salt-minion
+    - ls -alh /usr/bin/salt-bin-arista/salt-bin-arista
+    ## due to GitLab CI/CD parsing of colons, needs to be so
+    - sudo cat minion_additions | sudo tee -a /etc/salt/minion
+    - sudo -u root id
+    - id
+    - sudo -u root /usr/bin/salt-call --local test.versions
+    - sudo -u root /usr/bin/salt-call --local grains.items
+    - sudo -u root /usr/bin/salt-call --local cmd.run "ls -al /"
+    - sudo -u root /usr/bin/salt-call --local cmd.run 'FastCli --sysname ar --privilege 15 -c "show version"'
+    - sudo -u root /usr/bin/systemctl restart salt-minion
+    - sudo -u root /usr/bin/salt-call --local pyeapi.get_config
+    - sudo -u root /usr/bin/salt-call --local napalm.alive
+    - sudo -u root /usr/bin/salt-call --local sys.doc none
+
+  rules:
+    - if: "$CI_COMMIT_TAG != null && $CI_PROJECT_PATH == $CICD_UPSTREAM_PATH"
+      when: always
+    - when: never
+
+
+## Build 64-bit Arista
+##
+## Have to pull the version of salt that is being installed from that located in
+## CICD_SALT_LOCATION which depending on the nature of the build or development
+## can be of the following forms:
+##
+##  salt        - regular install from PyPI
+##  git+https://github.com/saltstack/salt#egg=salt
+##  git+https://github.com/dmurphy18/salt@v3000.4.arista#egg=salt
+##  git+ssh://git@github.com/dmurphy18/salt-cve@v3001.2#egg=salt
+
+build-arista64:
+  stage: build
+##  image: docker.artifactory.saltstack.net/centos:7
+  artifacts:
+    name: "$CI_JOB_NAME-$CI_COMMIT_REF_NAME"
+    paths:
+      - dist/run
+    expire_in: 120 days
+    reports:
+      dotenv: build.env
+  tags:
+    - centos7
+  script:
+    - gitlab-runner --version
+    - oldpwd=$(pwd)
+    - rm -fR dist
+    - yum -q makecache
+    - yum -y -q install python3-devel
+    - PYENV_CHECK=$(pyenv versions | grep ${CICD_PYTHON_VER})
+    - if [[ -n "${PYENV_CHECK}" ]]; then echo "Python ${CICD_PYTHON_VER} already installed. Skipping."; else pyenv install ${CICD_PYTHON_VER}; fi
+    - pyenv shell ${CICD_PYTHON_VER}
+    - cd /usr/bin/
+    - ldconfig /usr/local/lib
+    - ldconfig /usr/local/lib64
+    - export LD_LIBRARY_PATH=/usr/local/lib:/usr/local/lib64:$LD_LIBRARY_PATH
+    - export PATH=/usr/local/bin:/usr/bin:$PATH
+    - pip3 install pop-config==6.11.1
+    - pip3 install tiamat==7.10.2
+    - pyenv rehash && hash -r
+    - export CICD_SALT_DATE=$(date +"%a %b %0d %Y")
+    - export CICD_SALT_LOCATION_NB="git+https://github.com/saltstack/salt@$CICD_SALT_DEV_BRANCH#egg=salt"
+    - cd ${oldpwd}
+    - rm -fR dev_salt
+    - mkdir dev_salt
+    - cd dev_salt
+    - git clone -q https://github.com/saltstack/salt.git
+    - cd salt
+    - python3 setup.py -q sdist
+    - cd dist
+    ## - cd dev_salt/salt/dist
+    - ls -alh
+    - export CICD_SALT_TAR_GZ_NAME=$(ls salt-*)
+    - export CICD_SALT_LOCATION_NB=$(pwd)/${CICD_SALT_TAR_GZ_NAME}
+    - export CICD_SALT_VERSION=$(ls salt-* | sed s/salt-// | sed s/.tar.gz//)
+    - echo "${CICD_SALT_VERSION}"
+    - echo "${CICD_SALT_RELEASE}"
+    - echo "CI_PROJECT_DIR is ${CI_PROJECT_DIR}"
+    - cd ${oldpwd}
+    - rm -f arista_requirements.txt
+    - cp requirements.txt arista_requirements.txt
+    - export CICD_SALT_LOCATION_NB="./dev_salt/salt/dist/salt-${CICD_SALT_VERSION}.tar.gz"
+    - echo "CICD_SALT_LOCATION_NB is ${CICD_SALT_LOCATION_NB}"
+    - sed -i 's&SALT_LOCATION&'"$CICD_SALT_LOCATION_NB"'&' arista_requirements.txt
+    - sed -i 's&SALT_REPLACE_COMMENT_CHECK&&' arista_requirements.txt
+    - cat arista_requirements.txt
+    - export CICD_SALT_VERSION_ADJ=$(echo "$CICD_SALT_VERSION" | sed  "s/-/_/"g | sed "s/+/_/"g)
+    - echo "CICD_SALT_VERSION_ADJ is $CICD_SALT_VERSION_ADJ"
+    - echo "CICD_SALT_DATE=$CICD_SALT_DATE" > build.env
+    - echo "CICD_SALT_VERSION=$CICD_SALT_VERSION" >> build.env
+    - echo "CICD_SALT_VERSION_ADJ=$CICD_SALT_VERSION_ADJ" >> build.env
+    - echo "CICD_SALT_RELEASE=$CICD_SALT_RELEASE" >> build.env
+    - cd ${oldpwd}
+    ## now build
+    - tiamat build -c build.conf
+
+  rules:
+    - if: $CI_COMMIT_TAG
+      when: never
+    - when: on_success
+
+
+build-tags-arista64:
+  stage: build
+##  image: docker.artifactory.saltstack.net/centos:7
+  artifacts:
+    name: "$CI_JOB_NAME-$CI_COMMIT_REF_NAME"
+    paths:
+      - dist/run
+    expire_in: 120 days
+    reports:
+      dotenv: build.env
+  tags:
+    - centos7
+  script:
+    - gitlab-runner --version
+    - oldpwd=$(pwd)
+    - rm -fR dist
+    - yum -q makecache
+    - yum -y -q install python3-devel
+    - PYENV_CHECK=$(pyenv versions | grep ${CICD_PYTHON_VER})
+    - if [[ -n "${PYENV_CHECK}" ]]; then echo "Python ${CICD_PYTHON_VER} already installed. Skipping."; else pyenv install ${CICD_PYTHON_VER}; fi
+    - pyenv shell ${CICD_PYTHON_VER}
+    - cd /usr/bin/
+    - ldconfig /usr/local/lib
+    - ldconfig /usr/local/lib64
+    - export LD_LIBRARY_PATH=/usr/local/lib:/usr/local/lib64:$LD_LIBRARY_PATH
+    - export PATH=/usr/local/bin:/usr/bin:$PATH
+    - pip3 install pop-config==6.11.1
+    - pip3 install tiamat==7.10.2
+    - pyenv rehash && hash -r
+    - export CICD_SALT_DATE=$(date +"%a %b %0d %Y")
+    - export CICD_SALT_TAG=$(echo "${CI_COMMIT_TAG}" | cut -d '-' -f 1)
+    - export CICD_SALT_VERSION=$(echo "${CI_COMMIT_TAG}" | sed s/v// | cut -d '-' -f 1)
+    - export CICD_SALT_RELEASE=$(echo "${CI_COMMIT_TAG}" | sed s/v// | cut -d '-' -f 2)
+    ## ensure if no release number given default to 1
+    - if [[ "${CICD_SALT_VERSION}" = "${CICD_SALT_RELEASE}" ]]; then export CICD_SALT_RELEASE=1; fi
+    - export CICD_SALT_LOCATION="git+https://github.com/saltstack/salt@$CICD_SALT_TAG#egg=salt"
+    - echo "$CICD_SALT_TAG"
+    - echo "$CICD_SALT_VERSION"
+    - echo "$CICD_SALT_RELEASE"
+    - echo "$CICD_SALT_LOCATION"
+    - cd ${oldpwd}
+    - rm -f arista_requirements.txt
+    - cp requirements.txt arista_requirements.txt
+    - sed -i 's&SALT_LOCATION&'"$CICD_SALT_LOCATION"'&' arista_requirements.txt
+    - sed -i 's&SALT_REPLACE_COMMENT_CHECK&&' arista_requirements.txt
+    - cat arista_requirements.txt
+    - echo "CICD_SALT_DATE=$CICD_SALT_DATE" > build.env
+    - echo "CICD_SALT_VERSION=$CICD_SALT_VERSION" >> build.env
+    - echo "CICD_SALT_RELEASE=$CICD_SALT_RELEASE" >> build.env
+    - cd ${oldpwd}
+    ## now build
+    - tiamat build -c build.conf
+
+  rules:
+    - if: "$CI_COMMIT_TAG != null && $CI_PROJECT_PATH == $CICD_UPSTREAM_PATH"
+      when: always
+    - when: never
+
+
+pkg-rpm-arista64:
+  stage: pkg_rpm
+##  image: docker.artifactory.saltstack.net/centos:7
+  artifacts:
+    name: "$CI_JOB_NAME-$CI_COMMIT_REF_NAME"
+    paths:
+      - build_product_64
+    expire_in: 120 days
+  needs:
+    - job: build-arista64
+  tags:
+    - centos7
+  script:
+    - gitlab-runner --version
+    - oldpwd=$(pwd)
+    - find dist -name "__pycache__" | xargs rm -fR
+    - find dist -name "*.pyc" | xargs rm -f
+    - rm -fR dist/run/Cryptodome/SelfTest
+    - ls -alh dist
+    - du -sh dist
+    - yum -y -q install rpm-build
+    - echo "%_topdir /root/rpmbuild" >  /root/.rpmmacros
+    - echo "%_signature gpg" >>  /root/.rpmmacros
+    - echo "%_gpg_name packaging@saltstack.com" >>  /root/.rpmmacros
+    - rm -fR /root/rpmbuild
+    - mkdir -p /root/rpmbuild/{SPECS,SOURCES,BUILD}
+    - cp rpm_files/SPECS/salt-arista64.spec /root/rpmbuild/SPECS/
+    - echo "CICD_SALT_VERSION is $CICD_SALT_VERSION"
+    - echo "CICD_SALT_VERSION_ADJ is $CICD_SALT_VERSION_ADJ"
+    - sed -i "s/VERSION_TO_BE_REPLACED/$CICD_SALT_VERSION_ADJ/g" /root/rpmbuild/SPECS/salt-arista64.spec
+    - sed -i "s/RELEASE_TO_BE_REPLACED/$CICD_SALT_RELEASE/g" /root/rpmbuild/SPECS/salt-arista64.spec
+    - sed -i "s/DATE_TO_BE_REPLACED/$CICD_SALT_DATE/g" /root/rpmbuild/SPECS/salt-arista64.spec
+    - cp rpm_files/SOURCES/salt-minion.service /root/rpmbuild/SOURCES/
+    - cp rpm_files/SOURCES/salt-minion /root/rpmbuild/SOURCES/
+    - cp rpm_files/SOURCES/salt-common.logrotate /root/rpmbuild/SOURCES/
+    - cp rpm_files/SOURCES/salt-call /root/rpmbuild/SOURCES/
+    - cp rpm_files/SOURCES/salt-bin-arista /root/rpmbuild/SOURCES/
+    - cp rpm_files/SOURCES/minion /root/rpmbuild/SOURCES/
+    - cp -R dist/run /root/rpmbuild/SOURCES/
+    - ls -alh /root/rpmbuild/SOURCES/
+    - du -sh /root/rpmbuild/SOURCES/
+    - cd /root/rpmbuild
+    ## - rpmspec -v -P ./SPECS/salt-arista64.spec
+    - rpmbuild --quiet -ba ./SPECS/salt-arista64.spec
+    - cd ${oldpwd}
+    - rm -fR build_product_64
+    - mkdir build_product_64
+    - cd build_product_64
+    - cp -R /root/rpmbuild/RPMS/x86_64/* .
+
+  rules:
+    - if: $CI_COMMIT_TAG
+      when: never
+    - when: on_success
+
+
+pkg-tags-rpm-arista64:
+  stage: pkg_rpm
+##  image: docker.artifactory.saltstack.net/centos:7
+  artifacts:
+    name: "$CI_JOB_NAME-$CI_COMMIT_REF_NAME"
+    paths:
+      - build_product_64
+    expire_in: 120 days
+  needs:
+    - job: build-tags-arista64
+  tags:
+    - centos7
+  script:
+    - gitlab-runner --version
+    - oldpwd=$(pwd)
+    - find dist -name "__pycache__" | xargs rm -fR
+    - find dist -name "*.pyc" | xargs rm -f
+    - rm -fR dist/run/Cryptodome/SelfTest
+    - ls -alh dist
+    - du -sh dist
+    - yum -y -q install rpm-build
+    - echo "%_topdir /root/rpmbuild" >  /root/.rpmmacros
+    - echo "%_signature gpg" >>  /root/.rpmmacros
+    - echo "%_gpg_name packaging@saltstack.com" >>  /root/.rpmmacros
+    - rm -fR /root/rpmbuild
+    - mkdir -p /root/rpmbuild/{SPECS,SOURCES,BUILD}
+    - cp rpm_files/SPECS/salt-arista64.spec /root/rpmbuild/SPECS/
+    - echo "CICD_SALT_VERSION is $CICD_SALT_VERSION"
+    - sed -i "s/VERSION_TO_BE_REPLACED/$CICD_SALT_VERSION/g" /root/rpmbuild/SPECS/salt-arista64.spec
+    - sed -i "s/RELEASE_TO_BE_REPLACED/$CICD_SALT_RELEASE/g" /root/rpmbuild/SPECS/salt-arista64.spec
+    - sed -i "s/DATE_TO_BE_REPLACED/$CICD_SALT_DATE/g" /root/rpmbuild/SPECS/salt-arista64.spec
+    - cp rpm_files/SOURCES/salt-minion.service /root/rpmbuild/SOURCES/
+    - cp rpm_files/SOURCES/salt-minion /root/rpmbuild/SOURCES/
+    - cp rpm_files/SOURCES/salt-common.logrotate /root/rpmbuild/SOURCES/
+    - cp rpm_files/SOURCES/salt-call /root/rpmbuild/SOURCES/
+    - cp rpm_files/SOURCES/salt-bin-arista /root/rpmbuild/SOURCES/
+    - cp rpm_files/SOURCES/minion /root/rpmbuild/SOURCES/
+    - cp -R dist/run /root/rpmbuild/SOURCES/
+    - ls -alh /root/rpmbuild/SOURCES/
+    - du -sh /root/rpmbuild/SOURCES/
+    - cd /root/rpmbuild
+    ## - rpmspec -v -P ./SPECS/salt-arista64.spec
+    - rpmbuild --quiet -ba ./SPECS/salt-arista64.spec
+    - cd ${oldpwd}
+    - rm -fR build_product_64
+    - mkdir build_product_64
+    - cd build_product_64
+    - cp -R /root/rpmbuild/RPMS/x86_64/* .
+
+  rules:
+    - if: "$CI_COMMIT_TAG != null && $CI_PROJECT_PATH == $CICD_UPSTREAM_PATH"
+      when: always
+    - when: never
+
+
+pkg-swix-arista64:
+  stage: pkg_swix
+  image:
+    name: registry.gitlab.com/saltstack/open/salt-native-minion-arista/eos64:4.23
+    entrypoint: [""]
+  artifacts:
+    name: "$CI_JOB_NAME-$CI_COMMIT_REF_NAME"
+    paths:
+      - "*.swix"
+      - "trigger_file_done"
+    expire_in: 120 days
+  needs: [ "build-arista64", "pkg-rpm-arista64" ]
+  script:
+    - oldpwd=$(pwd)
+    - rm -f salt-*.swix
+    - cp build_product_64/salt*.x86_64.rpm /mnt/flash/
+    - cd /mnt/flash
+    - rm -f salt-*.swix
+    - ls -alh
+    - du -sh *
+    - echo "CICD_SALT_VERSION is ${CICD_SALT_VERSION}"
+    - echo "CICD_SALT_VERSION_ADJ is ${CICD_SALT_VERSION_ADJ}"
+    - echo "CICD_SALT_RELEASE is ${CICD_SALT_RELEASE}"
+    - swix create "salt-${CICD_SALT_VERSION_ADJ}-${CICD_SALT_RELEASE}.swix" "salt-${CICD_SALT_VERSION_ADJ}-${CICD_SALT_RELEASE}.x86_64.rpm"
+    - ls -alh "salt-${CICD_SALT_VERSION_ADJ}-${CICD_SALT_RELEASE}.swix"
+    - du -sh "salt-${CICD_SALT_VERSION_ADJ}-${CICD_SALT_RELEASE}.swix"
+    - mv "salt-${CICD_SALT_VERSION_ADJ}-${CICD_SALT_RELEASE}.swix" "${oldpwd}/salt-${CICD_SALT_VERSION_ADJ}-${CICD_SALT_RELEASE}.64.swix"
+    - echo "done" > ${oldpwd}/trigger_file_done
+  tags:
+    - saltstack-internal
+  rules:
+    - if: $CI_COMMIT_TAG
+      when: never
+    - when: on_success
+
+
+pkg-tags-swix-arista64:
+  stage: pkg_swix
+  image:
+    name: registry.gitlab.com/saltstack/open/salt-native-minion-arista/eos64:4.23
+    entrypoint: [""]
+  artifacts:
+    name: "$CI_JOB_NAME-$CI_COMMIT_REF_NAME"
+    paths:
+      - "*.64.swix"
+      - "trigger_file_done"
+    expire_in: 120 days
+  needs: [ "build-tags-arista64", "pkg-tags-rpm-arista64" ]
+  script:
+    - oldpwd=$(pwd)
+    - rm -f salt-*.swix
+    - cp build_product_64/salt*.x86_64.rpm /mnt/flash/
+    - cd /mnt/flash
+    - rm -f salt-*.swix
+    - ls -alh
+    - du -sh *
+    - echo "CICD_SALT_VERSION is ${CICD_SALT_VERSION}"
+    - echo "CICD_SALT_RELEASE is ${CICD_SALT_RELEASE}"
+    - swix create "salt-${CICD_SALT_VERSION}-${CICD_SALT_RELEASE}.swix" "salt-${CICD_SALT_VERSION}-${CICD_SALT_RELEASE}.x86_64.rpm"
+    - ls -alh "salt-${CICD_SALT_VERSION}-${CICD_SALT_RELEASE}.swix"
+    - du -sh "salt-${CICD_SALT_VERSION}-${CICD_SALT_RELEASE}.swix"
+    - mv "salt-${CICD_SALT_VERSION}-${CICD_SALT_RELEASE}.swix" "${oldpwd}/salt-${CICD_SALT_VERSION}-${CICD_SALT_RELEASE}.64.swix"
+    - echo "done" > ${oldpwd}/trigger_file_done
+  tags:
+    - saltstack-internal
+  rules:
+    - if: "$CI_COMMIT_TAG != null && $CI_PROJECT_PATH == $CICD_UPSTREAM_PATH"
+      when: always
+    - when: never
+
+
+test-swix-arista64_423:
+  stage: test_swix
+  artifacts:
+    name: "$CI_JOB_NAME-$CI_COMMIT_REF_NAME"
+    expire_in: 120 days
+  needs: [ "build-arista64", "pkg-rpm-arista64", "pkg-swix-arista64" ]
+  tags:
+    - veos64-423
+  script:
+    - gitlab-runner --version
+    - pwd
+    - id
+    - sudo yum clean all
+    - rm -rf dist/
+    - rm -rf build_product_64/
+    - df -h
+    - echo "CICD_SALT_VERSION is ${CICD_SALT_VERSION}"
+    - echo "CICD_SALT_VERSION_ADJ is ${CICD_SALT_VERSION_ADJ}"
+    - echo "CICD_SALT_RELEASE is ${CICD_SALT_RELEASE}"
+    - mv salt-${CICD_SALT_VERSION_ADJ}-${CICD_SALT_RELEASE}.64.swix /mnt/flash/
+    - ls -alh /mnt/flash/salt-${CICD_SALT_VERSION_ADJ}-${CICD_SALT_RELEASE}.64.swix
+    - echo $PATH
+    - /usr/bin/FastCli -c "$(echo -e enable\\nshow version)"
+    - /usr/bin/FastCli -c "show extensions" -e -p 15
+    - /usr/bin/FastCli -c "show management api http-commands" -e -p 15
+    - /usr/bin/FastCli -c "$(echo -e enable\\nconfigure\\nmanagement api http-commands\\nprotocol unix-socket\\nno shutdown\\nend\\nwri)"
+    - /usr/bin/FastCli -c "show management api http-commands" -e -p 15
+    - /usr/bin/FastCli -c "dir flash:" -e -p 15
+    - /usr/bin/FastCli -c "copy flash:salt-${CICD_SALT_VERSION_ADJ}-${CICD_SALT_RELEASE}.64.swix extension:" -e -p 15
+    - /usr/bin/FastCli -c "extension salt-${CICD_SALT_VERSION_ADJ}-${CICD_SALT_RELEASE}.64.swix" -e -p 15
+    - /usr/bin/FastCli -c "show extensions" -e -p 15
+    - sudo yum clean all
+    - ls -alh /opt/saltstack/salt/run/
+    - ls -alh /usr/bin/salt-call
+    - ls -alh /usr/bin/salt-minion
+    - ls -alh /usr/bin/salt-bin-arista/salt-bin-arista
+    ## due to GitLab CI/CD parsing of colons, needs to be so
+    - sudo cat minion_additions | sudo tee -a /etc/salt/minion
+    - sudo -u root id
+    - id
+    - sudo -u root /usr/bin/salt-call --local test.versions
+    - sudo -u root /usr/bin/salt-call --local grains.items
+    - sudo -u root /usr/bin/salt-call --local cmd.run "ls -al /"
+    - sudo -u root /usr/bin/salt-call --local cmd.run 'FastCli --sysname ar --privilege 15 -c "show version"'
+    - sudo -u root /usr/bin/systemctl restart salt-minion
+    - sudo -u root /usr/bin/salt-call --local pyeapi.get_config
+    - sudo -u root /usr/bin/salt-call --local napalm.alive
+    - sudo -u root /usr/bin/salt-call --local sys.doc none
+
+  rules:
+    - if: $CI_COMMIT_TAG
+      when: never
+    - when: on_success
+
+
+test-swix-arista64_424:
+  stage: test_swix
+  artifacts:
+    name: "$CI_JOB_NAME-$CI_COMMIT_REF_NAME"
+    expire_in: 120 days
+  needs: [ "build-arista64", "pkg-rpm-arista64", "pkg-swix-arista64" ]
+  tags:
+    - veos64-424
+  script:
+    - gitlab-runner --version
+    - pwd
+    - id
+    - sudo yum clean all
+    - rm -rf dist/
+    - rm -rf build_product_64/
+    - df -h
+    - echo "CICD_SALT_VERSION is ${CICD_SALT_VERSION}"
+    - echo "CICD_SALT_VERSION_ADJ is ${CICD_SALT_VERSION_ADJ}"
+    - echo "CICD_SALT_RELEASE is ${CICD_SALT_RELEASE}"
+    - mv salt-${CICD_SALT_VERSION_ADJ}-${CICD_SALT_RELEASE}.64.swix /mnt/flash/
+    - ls -alh /mnt/flash/salt-${CICD_SALT_VERSION_ADJ}-${CICD_SALT_RELEASE}.64.swix
+    - echo $PATH
+    - /usr/bin/FastCli -c "$(echo -e enable\\nshow version)"
+    - /usr/bin/FastCli -c "show extensions" -e -p 15
+    - /usr/bin/FastCli -c "show management api http-commands" -e -p 15
+    - /usr/bin/FastCli -c "$(echo -e enable\\nconfigure\\nmanagement api http-commands\\nprotocol unix-socket\\nno shutdown\\nend\\nwri)"
+    - /usr/bin/FastCli -c "show management api http-commands" -e -p 15
+    - /usr/bin/FastCli -c "dir flash:" -e -p 15
+    - /usr/bin/FastCli -c "copy flash:salt-${CICD_SALT_VERSION_ADJ}-${CICD_SALT_RELEASE}.64.swix extension:" -e -p 15
+    - /usr/bin/FastCli -c "extension salt-${CICD_SALT_VERSION_ADJ}-${CICD_SALT_RELEASE}.64.swix" -e -p 15
+    - /usr/bin/FastCli -c "show extensions" -e -p 15
+    - sudo yum clean all
+    - ls -alh /opt/saltstack/salt/run/
+    - ls -alh /usr/bin/salt-call
+    - ls -alh /usr/bin/salt-minion
+    - ls -alh /usr/bin/salt-bin-arista/salt-bin-arista
+    ## due to GitLab CI/CD parsing of colons, needs to be so
+    - sudo cat minion_additions | sudo tee -a /etc/salt/minion
+    - sudo -u root id
+    - id
+    - sudo -u root /usr/bin/salt-call --local test.versions
+    - sudo -u root /usr/bin/salt-call --local grains.items
+    - sudo -u root /usr/bin/salt-call --local cmd.run "ls -al /"
+    - sudo -u root /usr/bin/salt-call --local cmd.run 'FastCli --sysname ar --privilege 15 -c "show version"'
+    - sudo -u root /usr/bin/systemctl restart salt-minion
+    - sudo -u root /usr/bin/salt-call --local pyeapi.get_config
+    - sudo -u root /usr/bin/salt-call --local napalm.alive
+    - sudo -u root /usr/bin/salt-call --local sys.doc none
+
+  rules:
+    - if: $CI_COMMIT_TAG
+      when: never
+    - when: on_success
+
+
+test-tags-swix-arista64_423:
+  stage: test_swix
+  artifacts:
+    name: "$CI_JOB_NAME-$CI_COMMIT_REF_NAME"
+    expire_in: 120 days
+  needs: [ "build-tags-arista64", "pkg-tags-rpm-arista64", "pkg-tags-swix-arista64" ]
+  tags:
+    - veos64-423
+  script:
+    - gitlab-runner --version
+    - pwd
+    - id
+    - sudo yum clean all
+    - rm -rf dist/
+    - rm -rf build_product_64/
+    - df -h
+    - echo "CICD_SALT_VERSION is ${CICD_SALT_VERSION}"
+    - echo "CICD_SALT_RELEASE is ${CICD_SALT_RELEASE}"
+    - mv salt-${CICD_SALT_VERSION}-${CICD_SALT_RELEASE}.64.swix /mnt/flash/
+    - ls -alh /mnt/flash/salt-${CICD_SALT_VERSION}-${CICD_SALT_RELEASE}.64.swix
+    - echo $PATH
+    - /usr/bin/FastCli -c "$(echo -e enable\\nshow version)"
+    - /usr/bin/FastCli -c "show extensions" -e -p 15
+    - /usr/bin/FastCli -c "show management api http-commands" -e -p 15
+    - /usr/bin/FastCli -c "$(echo -e enable\\nconfigure\\nmanagement api http-commands\\nprotocol unix-socket\\nno shutdown\\nend\\nwri)"
+    - /usr/bin/FastCli -c "show management api http-commands" -e -p 15
+    - /usr/bin/FastCli -c "dir flash:" -e -p 15
+    - /usr/bin/FastCli -c "copy flash:salt-${CICD_SALT_VERSION}-${CICD_SALT_RELEASE}.64.swix extension:" -e -p 15
+    - /usr/bin/FastCli -c "extension salt-${CICD_SALT_VERSION}-${CICD_SALT_RELEASE}.64.swix" -e -p 15
+    - /usr/bin/FastCli -c "show extensions" -e -p 15
+    - sudo yum clean all
+    - ls -alh /opt/saltstack/salt/run/
+    - ls -alh /usr/bin/salt-call
+    - ls -alh /usr/bin/salt-minion
+    - ls -alh /usr/bin/salt-bin-arista/salt-bin-arista
+    ## due to GitLab CI/CD parsing of colons, needs to be so
+    - sudo cat minion_additions | sudo tee -a /etc/salt/minion
+    - sudo -u root id
+    - id
+    - sudo -u root /usr/bin/salt-call --local test.versions
+    - sudo -u root /usr/bin/salt-call --local grains.items
+    - sudo -u root /usr/bin/salt-call --local cmd.run "ls -al /"
+    - sudo -u root /usr/bin/salt-call --local cmd.run 'FastCli --sysname ar --privilege 15 -c "show version"'
+    - sudo -u root /usr/bin/systemctl restart salt-minion
+    - sudo -u root /usr/bin/salt-call --local pyeapi.get_config
+    - sudo -u root /usr/bin/salt-call --local napalm.alive
+    - sudo -u root /usr/bin/salt-call --local sys.doc none
+
+  rules:
+    - if: "$CI_COMMIT_TAG != null && $CI_PROJECT_PATH == $CICD_UPSTREAM_PATH"
+      when: always
+    - when: never
+
+
+test-tags-swix-arista64_424:
+  stage: test_swix
+  artifacts:
+    name: "$CI_JOB_NAME-$CI_COMMIT_REF_NAME"
+    expire_in: 120 days
+  needs: [ "build-tags-arista64", "pkg-tags-rpm-arista64", "pkg-tags-swix-arista64" ]
+  tags:
+    - veos64-424
+  script:
+    - gitlab-runner --version
+    - pwd
+    - id
+    - sudo yum clean all
+    - rm -rf dist/
+    - rm -rf build_product_64/
+    - df -h
+    - echo "CICD_SALT_VERSION is ${CICD_SALT_VERSION}"
+    - echo "CICD_SALT_RELEASE is ${CICD_SALT_RELEASE}"
+    - mv salt-${CICD_SALT_VERSION}-${CICD_SALT_RELEASE}.64.swix /mnt/flash/
+    - ls -alh /mnt/flash/salt-${CICD_SALT_VERSION}-${CICD_SALT_RELEASE}.64.swix
+    - echo $PATH
+    - /usr/bin/FastCli -c "$(echo -e enable\\nshow version)"
+    - /usr/bin/FastCli -c "show extensions" -e -p 15
+    - /usr/bin/FastCli -c "show management api http-commands" -e -p 15
+    - /usr/bin/FastCli -c "$(echo -e enable\\nconfigure\\nmanagement api http-commands\\nprotocol unix-socket\\nno shutdown\\nend\\nwri)"
+    - /usr/bin/FastCli -c "show management api http-commands" -e -p 15
+    - /usr/bin/FastCli -c "dir flash:" -e -p 15
+    - /usr/bin/FastCli -c "copy flash:salt-${CICD_SALT_VERSION}-${CICD_SALT_RELEASE}.64.swix extension:" -e -p 15
+    - /usr/bin/FastCli -c "extension salt-${CICD_SALT_VERSION}-${CICD_SALT_RELEASE}.64.swix" -e -p 15
+    - /usr/bin/FastCli -c "show extensions" -e -p 15
+    - sudo yum clean all
+    - ls -alh /opt/saltstack/salt/run/
+    - ls -alh /usr/bin/salt-call
+    - ls -alh /usr/bin/salt-minion
+    - ls -alh /usr/bin/salt-bin-arista/salt-bin-arista
+    ## due to GitLab CI/CD parsing of colons, needs to be so
+    - sudo cat minion_additions | sudo tee -a /etc/salt/minion
+    - sudo -u root id
+    - id
+    - sudo -u root /usr/bin/salt-call --local test.versions
+    - sudo -u root /usr/bin/salt-call --local grains.items
+    - sudo -u root /usr/bin/salt-call --local cmd.run "ls -al /"
+    - sudo -u root /usr/bin/salt-call --local cmd.run 'FastCli --sysname ar --privilege 15 -c "show version"'
+    - sudo -u root /usr/bin/systemctl restart salt-minion
+    - sudo -u root /usr/bin/salt-call --local pyeapi.get_config
+    - sudo -u root /usr/bin/salt-call --local napalm.alive
+    - sudo -u root /usr/bin/salt-call --local sys.doc none
+
+  rules:
+    - if: "$CI_COMMIT_TAG != null && $CI_PROJECT_PATH == $CICD_UPSTREAM_PATH"
+      when: always
+    - when: never

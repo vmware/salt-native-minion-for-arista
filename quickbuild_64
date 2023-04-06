@@ -1,0 +1,32 @@
+#!/usr/bin/bash
+
+# Copyright 2019-2022 VMware, Inc.
+# SPDX-License-Identifier: Apache-2
+
+rm -fR dist
+rm -fR build
+rm -f "${HOME}/tiamat.log"
+rm -f "${HOME}/mybuild.log"
+rm -f arista_requirements.txt
+rm -fR "${HOME}"/rpmbuild/*
+# using py 3.9.15
+./build_python39.sh
+### sudo ldconfig /usr/local/lib
+### sudo ldconfig /usr/local/lib64
+## sudo ldconfig ~/.pyenv/versions/3.9.13/lib
+## export LD_LIBRARY_PATH=~/.pyenv/versions/3.9.13/lib:/usr/local/lib:/usr/local/lib64:$LD_LIBRARY_PATH
+## export PATH=~/.pyenv/shims:~/.pyenv/bin:/usr/local/bin:/usr/bin:$PATH
+export LD_LIBRARY_PATH=/usr/local/lib:/usr/local/lib64:$LD_LIBRARY_PATH
+export PATH=/usr/local/bin:/usr/bin:$PATH
+python3 -m pip install tiamat==7.10.7
+cp -a ./rpm_files/SOURCES "${HOME}/rpmbuild/"
+cp -a ./rpm_files/SPECS "${HOME}/rpmbuild/"
+rm -f "${HOME}/rpmbuild/SPECS/salt-arista32.spec"
+cp requirements.txt arista_requirements.txt
+tiamat --log-file "${HOME}/tiamat.log" --log-level TRACE build -c build.conf 2>&1 | tee "${HOME}/mybuild.log"
+find dist -name __pycache__ -exec rm -fR {} +
+find dist -name "*.pyc" -exec rm -f {} +
+rm -fR dist/run/Cryptodome/SelfTest
+du -sh dist
+cp -a dist/run "${HOME}/rpmbuild/SOURCES/"
+cd "${HOME}/rpmbuild/SPECS" || exit
